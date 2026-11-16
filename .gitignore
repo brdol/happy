@@ -79,3 +79,6 @@ happy-workspaces/
 
 .context/
 .happy-tmp/
+
+# local release artifacts
+release-assets/
