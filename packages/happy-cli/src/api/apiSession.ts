@@ -324,8 +324,6 @@ export class ApiSessionClient extends EventEmitter {
         // Server events
         this.socket.on('update', (data: Update) => {
             try {
-                logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', data);
-
                 if (!data.body) {
                     logger.debug('[SOCKET] [UPDATE] [ERROR] No body in update!');
                     return;
@@ -338,14 +336,6 @@ export class ApiSessionClient extends EventEmitter {
                         return;
                     }
                     const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
-                    logger.debug('[SOCKET] [UPDATE] Decrypted message', {
-                        role: typeof (body as { role?: unknown })?.role === 'string'
-                            ? (body as { role: string }).role
-                            : 'unknown',
-                        contentType: typeof (body as { content?: { type?: unknown } })?.content?.type === 'string'
-                            ? (body as { content: { type: string } }).content.type
-                            : 'unknown',
-                    });
                     this.routeIncomingMessage(body);
                     this.lastReceivedSeq = messageSeq;
                 } else if (data.body.t === 'update-session') {

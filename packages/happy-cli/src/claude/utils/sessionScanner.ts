@@ -39,6 +39,12 @@ type TranscriptCursor = {
 
 const NEWLINE = 0x0a;
 
+// Read at most 1 MiB per sync. A large transcript is then consumed in bounded
+// chunks instead of materializing the whole file (and every parsed entry) at
+// once. The cursor advances per chunk, so a throwing callback still retries
+// only the chunk it did not finish.
+const MAX_SCANNER_READ_BYTES = 1024 * 1024;
+
 export async function createSessionScanner(opts: {
     sessionId: string | null,
     workingDirectory: string
@@ -76,12 +82,8 @@ export async function createSessionScanner(opts: {
 
     // Mark existing entries as processed and start watching the initial session
     if (opts.sessionId) {
-        let { entries, commit } = await readSessionEntries(projectDir, opts.sessionId, cursors);
-        logger.debug(`[SESSION_SCANNER] Marking ${entries.length} existing entries as processed from session ${opts.sessionId}`);
-        for (let entry of entries) {
-            processedEntryKeys.add(entry.key);
-        }
-        commit();
+        const marked = await markExistingEntries(projectDir, opts.sessionId, cursors, processedEntryKeys);
+        logger.debug(`[SESSION_SCANNER] Marking ${marked} existing entries as processed from session ${opts.sessionId}`);
         // IMPORTANT: Also start watching the initial session file because Claude Code
         // may continue writing to it even after creating a new session with --resume
         // (agent tasks and other updates can still write to the original session file)
@@ -110,23 +112,20 @@ export async function createSessionScanner(opts: {
         }
 
         // Process sessions
+        let more = false;
         for (let session of sessions) {
-            const { entries: sessionEntries, commit } = await readSessionEntries(projectDir, session, cursors);
-            let skipped = 0;
+            const { entries: sessionEntries, commit, hasMore } = await readSessionEntries(projectDir, session, cursors);
             let sentMessages = 0;
             let sentTranscriptEvents = 0;
             for (let entry of sessionEntries) {
                 if (processedEntryKeys.has(entry.key)) {
-                    skipped++;
                     continue;
                 }
                 processedEntryKeys.add(entry.key);
                 if (entry.kind === 'message') {
-                    logger.debug(`[SESSION_SCANNER] Sending new message: type=${entry.message.type}, uuid=${entry.message.type === 'summary' ? entry.message.leafUuid : entry.message.uuid}`);
                     opts.onMessage(entry.message);
                     sentMessages++;
                 } else {
-                    logger.debug(`[SESSION_SCANNER] Sending new transcript event: type=${entry.event.type}, uuid=${entry.event.uuid}`);
                     opts.onTranscriptEvent?.(entry.event);
                     sentTranscriptEvents++;
                 }
@@ -134,9 +133,17 @@ export async function createSessionScanner(opts: {
             // Advance only once every entry was handled, so a throwing
             // callback makes the retried sync read these lines again.
             commit();
-            if (sessionEntries.length > 0) {
-                logger.debug(`[SESSION_SCANNER] Session ${session}: found=${sessionEntries.length}, skipped=${skipped}, sentMessages=${sentMessages}, sentTranscriptEvents=${sentTranscriptEvents}`);
+            if (sentMessages > 0 || sentTranscriptEvents > 0) {
+                logger.debug(`[SESSION_SCANNER] sent=${sentMessages}${sentTranscriptEvents > 0 ? ` events=${sentTranscriptEvents}` : ''}`);
             }
+            if (hasMore) {
+                more = true;
+            }
+        }
+        // A large transcript is consumed in bounded chunks. Re-run immediately
+        // until the cursor reaches EOF; InvalidateSync coalesces this request.
+        if (more) {
+            sync.invalidate();
         }
 
         // Move pending sessions to finished sessions (but keep processing them via watchers)
@@ -228,12 +235,8 @@ export async function createSessionScanner(opts: {
             // file as fresh user prompts. Without this, every previous
             // user message re-appears in the chat after reconnect.
             if (options?.treatExistingAsProcessed) {
-                const { entries: existing, commit } = await readSessionEntries(projectDir, sessionId, cursors);
-                logger.debug(`[SESSION_SCANNER] Pre-marking ${existing.length} existing entries as processed for new session ${sessionId}`);
-                for (const entry of existing) {
-                    processedEntryKeys.add(entry.key);
-                }
-                commit();
+                const marked = await markExistingEntries(projectDir, sessionId, cursors, processedEntryKeys);
+                logger.debug(`[SESSION_SCANNER] Pre-marking ${marked} existing entries as processed for new session ${sessionId}`);
             }
             if (currentSessionId) {
                 pendingSessions.add(currentSessionId);
@@ -287,16 +290,16 @@ async function readSessionEntries(
     projectDir: string,
     sessionId: string,
     cursors: Map<string, TranscriptCursor>,
-): Promise<{ entries: SessionLogEntry[]; commit: () => void }> {
+): Promise<{ entries: SessionLogEntry[]; commit: () => void; hasMore: boolean }> {
     const expectedSessionFile = join(projectDir, `${sessionId}.jsonl`);
-    logger.debug(`[SESSION_SCANNER] Reading session file: ${expectedSessionFile}`);
     const cursor = cursors.get(expectedSessionFile);
     let data: Buffer;
     let next: TranscriptCursor;
+    let hasMore = false;
     try {
         const probe = await stat(expectedSessionFile);
         if (cursor && probe.dev === cursor.dev && probe.ino === cursor.ino && probe.size === cursor.offset) {
-            return { entries: [], commit: () => {} };
+            return { entries: [], commit: () => {}, hasMore: false };
         }
         const handle = await open(expectedSessionFile, 'r');
         try {
@@ -313,7 +316,8 @@ async function readSessionEntries(
                 }
             }
             const start = resumeFrom?.offset ?? 0;
-            const fresh = Buffer.alloc(size - start);
+            const end = Math.min(size, start + MAX_SCANNER_READ_BYTES);
+            const fresh = Buffer.alloc(end - start);
             let filled = 0;
             while (filled < fresh.length) {
                 const { bytesRead } = await handle.read(fresh, filled, fresh.length - filled, start + filled);
@@ -326,12 +330,16 @@ async function readSessionEntries(
                 ? Buffer.concat([resumeFrom.tail, fresh.subarray(0, filled)])
                 : fresh.subarray(0, filled);
             next = { dev, ino, offset: start + filled, tail: Buffer.alloc(0) };
+            // A zero-byte read means the file changed underneath us (for
+            // example it was truncated after stat). Do not report more data:
+            // the next sync will restart from the cursor instead of spinning.
+            hasMore = filled > 0 && start + filled < size;
         } finally {
             await handle.close();
         }
     } catch (error) {
         logger.debug(`[SESSION_SCANNER] Session file not found: ${expectedSessionFile}`);
-        return { entries: [], commit: () => {} };
+        return { entries: [], commit: () => {}, hasMore: false };
     }
     // Splitting on the newline byte cannot cut a multi-byte UTF-8 character,
     // so the complete lines decode cleanly and the unfinished one waits.
@@ -377,5 +385,40 @@ async function readSessionEntries(
             continue;
         }
     }
-    return { entries, commit: () => { cursors.set(expectedSessionFile, next); } };
+    return {
+        entries,
+        commit: () => { cursors.set(expectedSessionFile, next); },
+        hasMore,
+    };
+}
+
+/**
+ * Mark every entry currently in a transcript as processed without emitting it.
+ * Reads in bounded chunks so a large transcript does not materialize at once.
+ */
+async function markExistingEntries(
+    projectDir: string,
+    sessionId: string,
+    cursors: Map<string, TranscriptCursor>,
+    processedEntryKeys: Set<string>,
+): Promise<number> {
+    let marked = 0;
+    let hasMore = true;
+    // Bound the initial marking loop as well: a transcript that keeps growing
+    // must not pin startup forever. The regular sync loop picks up the rest.
+    let chunks = 0;
+    while (hasMore && chunks < 256) {
+        const { entries, commit, hasMore: more } = await readSessionEntries(projectDir, sessionId, cursors);
+        for (const entry of entries) {
+            processedEntryKeys.add(entry.key);
+        }
+        marked += entries.length;
+        commit();
+        hasMore = more;
+        chunks += 1;
+        if (hasMore) {
+            await new Promise<void>(resolve => setImmediate(resolve));
+        }
+    }
+    return marked;
 }
