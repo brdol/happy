@@ -49,6 +49,12 @@ export async function createSessionScanner(opts: {
      * its watcher gives up. This does not bound a late transcript file.
      */
     missingFileTimeoutMs?: number
+    /**
+     * Fallback polling interval in milliseconds. The file watcher provides
+     * low-latency updates; this poll only recovers missed watcher events.
+     * Defaults to 3000.
+     */
+    periodicSyncIntervalMs?: number
 }) {
 
     // Resolve project directory
@@ -171,7 +177,10 @@ export async function createSessionScanner(opts: {
     // only a fallback for environments where watcher events are missed
     // (WSL DrvFs, network filesystems, rename-based writes). With the
     // incremental cursor, an unchanged file costs one stat.
-    const intervalId = setInterval(() => { sync.invalidate(); }, 10000);
+    const intervalId = setInterval(
+        () => { sync.invalidate(); },
+        opts.periodicSyncIntervalMs ?? 3000
+    );
 
     // Public interface
     return {

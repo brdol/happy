@@ -223,6 +223,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 const scanner = await createSessionScanner({
                     sessionId: null,
                     workingDirectory,
+                    periodicSyncIntervalMs: 10000,
                     onMessage: (msg) => {
                         void session.sendClaudeSessionMessageFromLocalTranscript(msg);
                     },
@@ -445,6 +446,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const remoteScanner = await createSessionScanner({
         sessionId: initialScannerSessionId,
         workingDirectory,
+        periodicSyncIntervalMs: 10000,
         onMessage: (raw) => {
             if (currentRunMode !== 'remote') return;
             // Only user-typed prompts. SDK pipeline owns assistant and
