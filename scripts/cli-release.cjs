@@ -63,7 +63,12 @@ function checkPackage(root, version) {
 function smoke(prefix, version) {
   const root = path.join(prefix, 'node_modules', 'happy');
   checkPackage(root, version);
-  for (const args of [['--version'], ['--help'], ['daemon', 'status']]) {
+  // `happy --version` intentionally continues into the normal startup path so
+  // it can also print Claude's version, which makes it unsuitable for a
+  // non-interactive smoke test (it pauses for authentication when no
+  // credentials exist). The packed manifest version is verified by
+  // checkPackage() above; here we only need commands that terminate.
+  for (const args of [['--help'], ['daemon', 'status']]) {
     const result = spawnSync(process.execPath, [path.join(root, 'bin/happy.mjs'), ...args], {
       cwd: prefix,
       encoding: 'utf8',
@@ -79,7 +84,6 @@ function smoke(prefix, version) {
     process.stderr.write(result.stderr || '');
     if (result.error) throw result.error;
     assert.equal(result.status, 0, `happy ${args.join(' ')} failed`);
-    if (args[0] === '--version') checkVersionOutput(result.stdout, version);
   }
 }
 
