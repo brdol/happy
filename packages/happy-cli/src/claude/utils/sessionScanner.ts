@@ -171,7 +171,7 @@ export async function createSessionScanner(opts: {
     // only a fallback for environments where watcher events are missed
     // (WSL DrvFs, network filesystems, rename-based writes). With the
     // incremental cursor, an unchanged file costs one stat.
-    const intervalId = setInterval(() => { sync.invalidate(); }, 10000);
+    const intervalId = setInterval(() => { sync.invalidate(); }, 3000);
 
     // Public interface
     return {
