@@ -9,9 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Branch or tag to build (e.g. cli-1.2.5)
+        description: Branch or tag to build (required; e.g. vendor/1.2.5-scanner)
         required: true
-        default: cli-1.2.5
         type: string
       version:
         description: Stable X.Y.Z or beta X.Y.Z-beta.N, without the leading v
@@ -21,7 +20,7 @@ on:
       release_notes:
         description: Markdown change notes for the GitHub Release
         required: true
-        default: Fork build of Happy CLI 1.2.5 (upstream baseline).
+        default: Fork build of Happy CLI 1.2.5.
         type: string
       prerelease:
         description: Mark the GitHub Release as a prerelease
@@ -68,7 +67,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_NOTES: ${{ inputs.release_notes }}
+          RELEASE_REF: ${{ inputs.ref }}
         run: |
+          if [[ -z "${RELEASE_REF//[[:space:]]/}" ]]; then
+            echo 'ref must not be blank.' >&2
+            exit 1
+          fi
           node --test scripts/cli-release.test.cjs
           node scripts/cli-release.cjs validate
           if [[ -z "${RELEASE_NOTES//[[:space:]]/}" ]]; then
@@ -119,9 +123,16 @@ jobs:
           notes_file="$RUNNER_TEMP/happy-release-notes.md"
           printf '%s\n' "$RELEASE_NOTES" > "$notes_file"
           release_args=()
-          if [[ "$RELEASE_PRERELEASE" == 'true' ]]; then release_args+=(--prerelease); fi
-          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
+          if [[ "$RELEASE_PRERELEASE" == 'true' ]]; then
+            release_args+=(--prerelease --latest=false)
+          else
+            release_args+=(--latest)
+          fi
+          # Tag the commit that was actually checked out and built. GITHUB_SHA
+          # is the workflow-dispatch ref, which is not necessarily inputs.ref.
+          target_sha="$(git rev-parse HEAD)"
+          gh release create "$RELEASE_TAG" --target "$target_sha" \
             --title "Happy CLI v$RELEASE_VERSION" --notes-file "$notes_file" \
-            --latest=false "${release_args[@]}"
+            "${release_args[@]}"
           gh release upload "$RELEASE_TAG" release-assets/* --clobber
           gh release view "$RELEASE_TAG" --json url --jq .url
